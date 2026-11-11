@@ -50,6 +50,8 @@ textarea{width:100%;min-height:150px;font-family:ui-monospace,Consolas,monospace
 .t1{color:var(--t1)}.t2{color:var(--t2)}.t3{color:var(--t3)}.t4{color:var(--t4)}
 .msg{min-height:26px;font-weight:600}.msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}.msg.warn{color:var(--warn)}
 .heard{color:var(--mute);font-size:14px;min-height:20px}
+.pyin{display:flex;gap:8px;width:100%;max-width:380px}
+.pyin input{flex:1;min-width:0;font-size:18px;text-align:center}
 .mic{width:84px;height:84px;border-radius:50%;font-size:34px;padding:0;background:var(--acc);border-color:var(--acc);color:#fff}
 .mic.live{animation:pulse 1s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(192,57,43,.5)}100%{box-shadow:0 0 0 22px rgba(192,57,43,0)}}
@@ -216,11 +218,14 @@ function stopRec(){try{rec&&rec.abort()}catch(e){}rec=null;if(S)S.listening=fals
 function nextCard(){
   stopRec();
   if(!S.q.length)return endSession();
-  S.cur=S.q[0];S.phase='ask';S.heard='';S.msg='';S.msgCls='';renderCard();
+  S.cur=S.q[0];S.phase='ask';S.heard='';S.typed=false;S.pyVal='';S.msg='';S.msgCls='';
+  S.focusNext=!!(window.matchMedia&&matchMedia('(pointer:fine)').matches); // foco automático só com mouse (no celular abriria o teclado a cada cartão)
+  renderCard();
   if(S.mode==='voz'&&db.set.auto)setTimeout(()=>{if(S&&S.phase==='ask')listen()},350);
 }
 function renderCard(){
   if(!S||!S.cur)return;
+  const hadFocus=!!document.activeElement&&document.activeElement.id==='pyinp';
   const c=S.cur,ask=S.phase==='ask',res=S.phase==='ok'||S.phase==='bad';
   const showAns=S.phase!=='ask'||S.revealed;
   $('#study').innerHTML=`
@@ -230,7 +235,8 @@ function renderCard(){
     <div class="pinyin">${showAns?colorPinyin(pyShow(c)):''}</div>
     <div class="trans">${showAns?esc(c.t):''}</div>
     <div class="msg ${S.msgCls}">${esc(S.msg)}</div>
-    <div class="heard">${S.heard?'Ouvi: '+esc(S.heard):''}</div>
+    <div class="heard">${S.heard?(S.typed?'Digitou: ':'Ouvi: ')+esc(S.heard):''}</div>
+    ${ask?`<form class="pyin" id="pyform" autocomplete="off"><input type="text" id="pyinp" value="${esc(S.pyVal||'')}" placeholder="Ou digite o pinyin (ex.: ni3 hao3)" enterkeyhint="done" autocapitalize="off" autocorrect="off" spellcheck="false"><button class="pri" type="submit">OK</button></form>`:''}
     <div class="ctl">
       ${ask&&S.mode==='voz'?`<button class="mic ${S.listening?'live':''}" id="mic" title="Falar (Espaço)">🎤</button>`:''}
       ${ask&&S.mode==='manual'&&!S.revealed?`<button class="pri" id="reveal">Mostrar resposta (Espaço)</button>`:''}
@@ -251,6 +257,10 @@ function renderCard(){
   on('dontknow',()=>{S.revealed=false;judgeWrong('')});
   on('cont',advance);
   on('override',override);
+  const pi=$('#pyinp'),pf=$('#pyform');
+  if(pi){pi.oninput=()=>{S.pyVal=pi.value};
+    if(hadFocus||S.focusNext){S.focusNext=false;pi.focus();const n=pi.value.length;pi.setSelectionRange(n,n)}}
+  if(pf)pf.onsubmit=e=>{e.preventDefault();judgeTyped(pi.value)};
 }
 function listen(){
   if(!SR||!S||S.phase!=='ask'||S.listening)return;
@@ -268,22 +278,50 @@ function listen(){
 }
 function judge(alts){
   if(!S||S.phase!=='ask')return;
-  const c=S.cur,target=hanOnly(c.h);S.listening=false;rec=null;S.heard=alts[0]||'';
+  const c=S.cur,target=hanOnly(c.h);S.listening=false;rec=null;S.heard=alts[0]||'';S.typed=false;
   let ok=!!target&&alts.some(a=>hanOnly(a)===target);
   if(!ok&&PY&&target){const tp=pyOf(target);ok=!!tp&&alts.some(a=>{const h=hanOnly(a);return h&&pyOf(h)===tp})}
   ok?judgeRight():judgeWrong('');
 }
-function judgeRight(){
+/* chave de comparação do pinyin: letras (ü=u) + sequência de tons. Aceita acentos (nǐ), números (ni3) ou sem tons (ni) */
+function pyKey(s,digits){
+  let L='',T=[];
+  for(const ch of s.toLowerCase().normalize('NFD')){
+    if(ch==='̄')T.push(1);else if(ch==='́')T.push(2);else if(ch==='̌')T.push(3);else if(ch==='̀')T.push(4);
+    else if(ch>='a'&&ch<='z')L+=ch==='v'?'u':ch;
+    else if(digits&&ch>='1'&&ch<='4')T.push(+ch);
+  }
+  return{L,T};
+}
+function judgeTyped(txt){
+  if(!S||S.phase!=='ask')return;
+  txt=(txt||'').trim();if(!txt){toast('Digite o pinyin primeiro.');return}
+  const c=S.cur;let ok=false,note='',why='';
+  S.heard=txt;S.typed=true;
+  if(HAN.test(txt)){ok=hanOnly(txt)===hanOnly(c.h)}   // também aceita digitar os hanzi
+  else{
+    const tgt=pyShow(c);
+    if(!tgt){toast('Esta palavra não tem pinyin para conferir. Use "Mostrar resposta".');return}
+    const t=pyKey(tgt,false),u=pyKey(txt,true);
+    ok=!!t.L&&u.L===t.L;
+    if(ok&&!/\d/.test(tgt)){                          // palavras com dígitos no pinyin (MC4, UN 38.3) só conferem as letras
+      if(!u.T.length&&!/[05]/.test(txt))note=' (sem tons, tente incluir)';
+      else if(u.T.length&&u.T.join()!==t.T.join()){ok=false;why='Letras certas, mas os tons não conferem'}
+    }
+  }
+  ok?judgeRight(note):judgeWrong(why);
+}
+function judgeRight(note=''){
   const c=S.cur;stopRec();
   if(!S.tried.has(c.i)){promote(c);S.ok++}
-  S.phase='ok';S.msg='✓ Correto';S.msgCls='ok';renderCard();
+  S.phase='ok';S.msg='✓ Correto'+note;S.msgCls='ok';renderCard();
   setTimeout(()=>{if(S&&S.cur===c&&S.phase==='ok')advance()},S.mode==='voz'?1400:300);
 }
 function judgeWrong(note){
   const c=S.cur;stopRec();
   if(!S.tried.has(c.i)){(S.prev||(S.prev={}))[c.i]={s:c.s,u:c.u,l:c.l};demote(c);S.miss.push(c)}
   S.tried.add(c.i);
-  S.phase='bad';S.msg=note==='Sem resposta'?'Sem problema, veja a resposta:':'✗ Não confere';S.msgCls='bad';renderCard();speak(c.h);
+  S.phase='bad';S.msg=note==='Sem resposta'?'Sem problema, veja a resposta:':(note?'✗ '+note:'✗ Não confere');S.msgCls='bad';renderCard();speak(c.h);
 }
 function override(){ // reconhecimento errou, mas eu falei certo
   const c=S.cur;
